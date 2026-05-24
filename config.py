@@ -7,7 +7,7 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8653828261:AAF0fh_T2yQsp8YljirCtB1uT6SHpiIm6FE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "0") or "0")
 DESTINATION_CHANNEL_ID = int(os.getenv("DESTINATION_CHANNEL_ID", "0") or "0")
 
