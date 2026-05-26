@@ -4,7 +4,7 @@ from PIL import Image
 def apply_frame(screenshot_path, output_path="framed_output.png"):
     frame_path = "frame.png"
 
-    LEFT = 15
+    LEFT = 35
     TOP = 35
     WIDTH = 1278
     HEIGHT = 775
