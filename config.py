@@ -7,7 +7,7 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8653828261:AAF0fh_T2yQsp8YljirCtB1uT6SHpiIm6FE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "0") or "0")
 DESTINATION_CHANNEL_ID = int(os.getenv("DESTINATION_CHANNEL_ID", "0") or "0")
 
@@ -30,7 +30,7 @@ def _parse_admin_ids(raw: str) -> list[int]:
     return ids
 
 
-ADMIN_USER_IDS = _parse_admin_ids(os.getenv("ADMIN_USER_IDS", "941439783"))
+ADMIN_USER_IDS = _parse_admin_ids(os.getenv("ADMIN_USER_IDS", ""))
 
 AMAZON_DOMAIN = os.getenv("AMAZON_DOMAIN", "www.amazon.eg")
 

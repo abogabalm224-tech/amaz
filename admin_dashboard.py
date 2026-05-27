@@ -13,11 +13,12 @@ from telegram.ext import (
     filters,
 )
 
-from config import ADMIN_USER_IDS
+from config import ADMIN_USER_IDS, AMAZON_DOMAIN
 from ai_caption import (
     MODE_ARABIC,
     MODE_CONSERVATIVE,
     MODE_CUSTOM,
+    MODE_FIXED_TEMPLATE,
     MODE_MARKETING,
     MODE_OFF,
 )
@@ -34,6 +35,7 @@ from conversation_states import (
     AWAIT_MANUAL_INPUT,
     AWAIT_RESTORE_UPLOAD,
     AWAIT_SOURCE_ID,
+    AWAIT_AFFILIATE_TAG_VALUE,
     AWAIT_TELETHON_CODE,
     AWAIT_TELETHON_PASSWORD,
 )
@@ -48,11 +50,11 @@ from telethon_auth import (
     submit_password,
 )
 from database import Database
+from affiliate_tag import apply_affiliate_tag, is_valid_affiliate_tag, set_affiliate_settings
 from manual_posts import (
     UD_EDITING_DRAFT,
     UD_MANUAL_MODE,
     handle_edit_draft,
-    manual_entry_handler,
     manual_state_handlers,
 )
 
@@ -78,6 +80,12 @@ CB_AI_CONSERVATIVE = "adm:ai:conservative"
 CB_AI_MARKETING = "adm:ai:marketing"
 CB_AI_ARABIC = "adm:ai:arabic"
 CB_AI_CUSTOM = "adm:ai:custom"
+CB_AI_FIXED_TEMPLATE = "adm:ai:fixed"
+CB_AFFILIATE_SETTINGS = "adm:affiliate"
+CB_AFFILIATE_ON = "adm:affiliate:on"
+CB_AFFILIATE_OFF = "adm:affiliate:off"
+CB_AFFILIATE_CHANGE = "adm:affiliate:change"
+CB_AFFILIATE_TEST = "adm:affiliate:test"
 CB_TELETHON_START = "adm:telethon:start"
 CB_BACKUP = "adm:backup"
 CB_RESTORE = "adm:restore"
@@ -143,6 +151,12 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
                 InlineKeyboardButton("🤖 AI Caption", callback_data=CB_AI),
             ],
             [
+                InlineKeyboardButton(
+                    "🔗 Affiliate Tag Settings",
+                    callback_data=CB_AFFILIATE_SETTINGS,
+                ),
+            ],
+            [
                 InlineKeyboardButton("💾 Backup", callback_data=CB_BACKUP),
                 InlineKeyboardButton("♻ Restore Backup", callback_data=CB_RESTORE),
             ],
@@ -175,6 +189,7 @@ def _ai_mode_label(mode: str) -> str:
         MODE_MARKETING: "Marketing",
         MODE_ARABIC: "Arabic Translate",
         MODE_CUSTOM: "Custom",
+        MODE_FIXED_TEMPLATE: "Fixed Template",
     }
     return labels.get(mode, mode)
 
@@ -191,6 +206,7 @@ def _ai_caption_keyboard(current_mode: str) -> InlineKeyboardMarkup:
             [btn("Marketing", CB_AI_MARKETING, MODE_MARKETING)],
             [btn("Arabic Translate", CB_AI_ARABIC, MODE_ARABIC)],
             [btn("Custom", CB_AI_CUSTOM, MODE_CUSTOM)],
+            [btn("Fixed Template", CB_AI_FIXED_TEMPLATE, MODE_FIXED_TEMPLATE)],
             [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
         ]
     )
@@ -216,6 +232,16 @@ def refresh_runtime_config(application) -> None:
     application.bot_data["active_source_ids"] = db.get_active_channel_ids()
     application.bot_data["paused"] = db.is_paused()
     application.bot_data["destination_channel_id"] = db.get_destination_channel_id()
+    # Keep affiliate tag helper in sync for worker threads/caption building.
+    try:
+        application.bot_data["affiliate_tag_enabled"] = db.get_affiliate_tag_enabled()
+        application.bot_data["affiliate_tag_value"] = db.get_affiliate_tag_value()
+        set_affiliate_settings(
+            application.bot_data["affiliate_tag_enabled"],
+            application.bot_data["affiliate_tag_value"],
+        )
+    except Exception:
+        logger.exception("Failed to refresh affiliate tag settings")
 
 
 async def _dashboard_text(application) -> str:
@@ -247,6 +273,57 @@ async def _dashboard_text(application) -> str:
             "Tap <b>Start Telethon Login</b> below."
         )
     return "\n".join(lines)
+
+
+def _affiliate_tag_menu_text(db: Database) -> str:
+    enabled = db.get_affiliate_tag_enabled()
+    value = db.get_affiliate_tag_value()
+    status = "ON" if enabled else "OFF"
+    if enabled and value:
+        return (
+            "🔗 <b>Affiliate Tag Settings</b>\n\n"
+            f"Status: <b>{status}</b>\n"
+            f"Current tag: <code>{value}</code>\n"
+            "\n"
+            "Toggle and set your Amazon affiliate tag."
+        )
+    if enabled and not value:
+        return (
+            "🔗 <b>Affiliate Tag Settings</b>\n\n"
+            f"Status: <b>{status}</b>\n"
+            "Current tag: <code>(empty)</code>\n\n"
+            "Set a tag value below."
+        )
+    return (
+        "🔗 <b>Affiliate Tag Settings</b>\n\n"
+        f"Status: <b>{status}</b>\n"
+        "Current tag: <code>(disabled)</code>\n"
+        "\n"
+        "Enable to append `tag=` to published/display links."
+    )
+
+
+def _affiliate_tag_keyboard(db: Database) -> InlineKeyboardMarkup:
+    enabled = db.get_affiliate_tag_enabled()
+    on_btn = (
+        InlineKeyboardButton("✅ Affiliate Tag: ON", callback_data=CB_AFFILIATE_ON)
+        if not enabled
+        else InlineKeyboardButton("✅ Affiliate Tag: ON", callback_data=CB_AFFILIATE_ON)
+    )
+    off_btn = (
+        InlineKeyboardButton("❌ Affiliate Tag: OFF", callback_data=CB_AFFILIATE_OFF)
+        if enabled
+        else InlineKeyboardButton("❌ Affiliate Tag: OFF", callback_data=CB_AFFILIATE_OFF)
+    )
+    return InlineKeyboardMarkup(
+        [
+            [on_btn],
+            [off_btn],
+            [InlineKeyboardButton("✏ Change Tag", callback_data=CB_AFFILIATE_CHANGE)],
+            [InlineKeyboardButton("🧪 Test Affiliate Link", callback_data=CB_AFFILIATE_TEST)],
+            [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
+        ]
+    )
 
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -333,16 +410,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         path = Path(zip_path)
         await _safe_edit_message_text(
             query,
-            "♻ Restoring backup and restarting…",
+            "♻ Restoring backup and restarting…\n\n"
+            "You will see progress updates here.",
             parse_mode="HTML",
         )
+        admin_id = user.id if user else None
         try:
-            await apply_restore_and_restart(app, path)
-        except Exception as exc:
-            logger.exception("Restore failed")
-            await query.message.reply_text(f"Restore failed: {exc}")
+            await apply_restore_and_restart(app, path, admin_id)
         finally:
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink(missing_ok=True)
             context.user_data.pop(UD_PENDING_RESTORE, None)
             app.bot_data.pop("pending_restore_zip", None)
         return ConversationHandler.END
@@ -671,6 +748,70 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return AWAIT_AI_CUSTOM
 
+    if data == CB_AI_FIXED_TEMPLATE:
+        db.set_ai_caption_mode(MODE_FIXED_TEMPLATE)
+        await _safe_edit_message_text(
+            query,
+            await _ai_caption_menu_text(db),
+            reply_markup=_ai_caption_keyboard(MODE_FIXED_TEMPLATE),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_AFFILIATE_SETTINGS:
+        refresh_runtime_config(app)
+        await _safe_edit_message_text(
+            query,
+            _affiliate_tag_menu_text(db),
+            reply_markup=_affiliate_tag_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_AFFILIATE_ON:
+        db.set_affiliate_tag_enabled(True)
+        refresh_runtime_config(app)
+        await _safe_edit_message_text(
+            query,
+            _affiliate_tag_menu_text(db),
+            reply_markup=_affiliate_tag_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_AFFILIATE_OFF:
+        db.set_affiliate_tag_enabled(False)
+        refresh_runtime_config(app)
+        await _safe_edit_message_text(
+            query,
+            _affiliate_tag_menu_text(db),
+            reply_markup=_affiliate_tag_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_AFFILIATE_CHANGE:
+        await _safe_edit_message_text(
+            query,
+            "✏ <b>Change Affiliate Tag</b>\n\n"
+            "Send new affiliate tag value.\n"
+            "Valid chars: letters, numbers, hyphen (-), underscore (_)\n\n"
+            "Example: <code>sallaa-21</code>\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_AFFILIATE_TAG_VALUE
+
+    if data == CB_AFFILIATE_TEST:
+        sample = f"https://{AMAZON_DOMAIN}/dp/B0G1ZC6Z3L"
+        transformed = apply_affiliate_tag(sample)
+        await query.message.reply_text(
+            "🧪 Test Affiliate Link\n\n"
+            f"Original: {sample}\n"
+            f"Transformed: {transformed}"
+        )
+        return ConversationHandler.END
+
     return ConversationHandler.END
 
 
@@ -795,6 +936,39 @@ async def receive_ai_custom_prompt(
         "✅ Custom brand instructions saved.\n\n" + await _ai_caption_menu_text(db),
         reply_markup=_ai_caption_keyboard(MODE_CUSTOM),
         parse_mode="HTML",
+    )
+    return ConversationHandler.END
+
+
+async def receive_affiliate_tag_value(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    if not msg or not msg.text:
+        return AWAIT_AFFILIATE_TAG_VALUE
+
+    tag = (msg.text or "").strip()
+    if not is_valid_affiliate_tag(tag):
+        await msg.reply_text(
+            "❌ Invalid affiliate tag.\n\n"
+            "Allowed characters only: letters, numbers, hyphen (-), underscore (_).\n"
+            "Example: sallaa-21\n\n"
+            "Try again or /cancel.",
+        )
+        return AWAIT_AFFILIATE_TAG_VALUE
+
+    db = _db(context)
+    db.set_affiliate_tag_value(tag)
+    refresh_runtime_config(context.application)
+
+    await msg.reply_text(
+        f"✅ Affiliate tag saved: <code>{tag}</code>",
+        parse_mode="HTML",
+        reply_markup=_affiliate_tag_keyboard(db),
     )
     return ConversationHandler.END
 
@@ -926,7 +1100,6 @@ def build_admin_handlers() -> list:
         entry_points=[
             CommandHandler("admin", cmd_admin, filters=admin_filter),
             CallbackQueryHandler(on_callback, pattern=r"^adm:"),
-            manual_entry_handler(admin_filter),
             CallbackQueryHandler(handle_edit_draft, pattern=r"^edit_draft:\d+$"),
         ],
         states={
@@ -970,6 +1143,12 @@ def build_admin_handlers() -> list:
                 MessageHandler(
                     admin_filter & filters.Document.ALL,
                     receive_restore_upload,
+                ),
+            ],
+            AWAIT_AFFILIATE_TAG_VALUE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_affiliate_tag_value,
                 ),
             ],
             **manual_states,

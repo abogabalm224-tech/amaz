@@ -1,6 +1,7 @@
 """Backup and restore for server migration."""
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -14,11 +15,11 @@ from config import DATABASE_PATH, TELEGRAM_SESSION_NAME
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+RESTORE_MARKER = PROJECT_ROOT / ".restore_initiator.json"
 
 BACKUP_ROOT_FILES = frozenset(
     {
         ".env",
-        "frame.png",
         "requirements.txt",
         "config.py",
         Path(DATABASE_PATH).name,
@@ -189,7 +190,98 @@ def restart_bot_process() -> None:
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-async def apply_restore_and_restart(application, zip_path: Path) -> None:
-    await shutdown_for_restore(application)
-    restore_from_zip(zip_path)
-    restart_bot_process()
+async def apply_restore_and_restart(
+    application,
+    zip_path: Path,
+    admin_chat_id: int | None = None,
+) -> None:
+    bot = application.bot
+
+    async def _notify(text: str) -> None:
+        if not admin_chat_id:
+            return
+        try:
+            await bot.send_message(chat_id=admin_chat_id, text=text)
+        except Exception:
+            logger.exception("Failed to send restore progress message")
+
+    try:
+        await _notify("📦 Validating backup archive...")
+        errors = validate_backup_zip(zip_path)
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        await _notify("✅ Archive validated\n🛑 Stopping services...")
+        await shutdown_for_restore(application)
+
+        await _notify("💾 Restoring files...")
+        restored = restore_from_zip(zip_path)
+
+        important = []
+        db_name = Path(DATABASE_PATH).name
+        for name in ("bot.db", db_name, ".env", "config.py"):
+            if name in restored:
+                important.append(name)
+        for item in restored:
+            if item.endswith(".session") or item.endswith(".session-journal"):
+                important.append(item)
+                break
+        if important:
+            summary = "Restored:\n" + "\n".join(f"• {n}" for n in important)
+            await _notify(f"✅ Files restored\n{summary}")
+        else:
+            await _notify("✅ Files restored")
+
+        await _notify("🚀 Restarting bot...")
+
+        if admin_chat_id:
+            RESTORE_MARKER.write_text(
+                json.dumps({"admin_id": admin_chat_id}),
+                encoding="utf-8",
+            )
+
+        restart_bot_process()
+    except Exception as exc:
+        logger.exception("Restore failed")
+        await _notify(f"❌ Restore failed\n\nReason:\n{exc}")
+
+
+async def maybe_notify_restore_complete(application) -> None:
+    """After startup, notify admin if a restore was just performed."""
+    if not RESTORE_MARKER.is_file():
+        return
+
+    try:
+        data = json.loads(RESTORE_MARKER.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        logger.exception("Failed to read restore marker")
+        RESTORE_MARKER.unlink(missing_ok=True)
+        return
+
+    admin_id = data.get("admin_id")
+    RESTORE_MARKER.unlink(missing_ok=True)
+    if not admin_id:
+        return
+
+    from telethon_auth import is_telethon_connected
+    from database import Database
+
+    bot = application.bot
+    db: Database = application.bot_data.get("db")
+    sources = db.list_sources(active_only=True) if db else []
+    dest = application.bot_data.get("destination_channel_id")
+
+    telethon_line = "Telethon connected" if is_telethon_connected(application) else "Telethon not connected"
+    dest_line = "Destination ready" if dest else "Destination not configured"
+
+    text = (
+        "✅ Backup restore completed successfully\n\n"
+        f"{telethon_line}\n"
+        f"Sources loaded: {len(sources)}\n"
+        f"{dest_line}"
+    )
+
+    try:
+        await bot.send_message(chat_id=admin_id, text=text)
+    except Exception:
+        logger.exception("Failed to send post-restore notification")

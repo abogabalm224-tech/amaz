@@ -32,6 +32,7 @@ from duplicate_moderation import (
     send_approval_request,
 )
 from file_cleanup import cleanup_files
+from affiliate_tag import apply_affiliate_tag
 from manual_posts import build_manual_handlers
 from image_processor import apply_frame
 from link_resolver import (
@@ -47,6 +48,7 @@ from telegram_listener import start_telethon_listener, stop_telethon_listener
 from ai_caption import build_product_caption
 from telegram_publisher import build_caption, publish_to_channel
 from upload_prep import to_jpeg_for_telegram
+from backup_restore import maybe_notify_restore_complete
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,19 +92,20 @@ async def process_single_url(
         logger.info("ASIN FOUND: %s", asin)
 
         clean_url = build_clean_url(asin, AMAZON_DOMAIN)
+        display_url = apply_affiliate_tag(clean_url)
         scrape_asin = f"{asin}_{message_id}_{index}"
         product = await scrape_amazon(browser, clean_url, scrape_asin)
         temp_files.append(product["screenshot"])
         logger.info("SCRAPE SUCCESS: %r %r", product["title"], product["price"])
 
         if product["title"] == "Not found":
-            caption = build_caption(product["title"], product["price"], clean_url)
+            caption = build_caption(product["title"], product["price"], display_url)
         else:
             caption = await build_product_caption(
                 db,
                 product["title"],
                 product["price"],
-                clean_url,
+                display_url,
             )
         framed_image = apply_frame(product["screenshot"])
         temp_files.append(framed_image)
@@ -289,6 +292,7 @@ async def on_startup(application) -> None:
         application.bot_data.get("destination_channel_id"),
         application.bot_data.get("paused"),
     )
+    await maybe_notify_restore_complete(application)
 
 
 async def on_shutdown(application) -> None:
@@ -332,12 +336,18 @@ def main() -> None:
         tg_filters.User(user_id=ADMIN_USER_IDS) if ADMIN_USER_IDS else tg_filters.ALL
     )
 
+    # Group 0: ConversationHandler (admin dashboard, moderation).
+    # Active conversation states are always checked first.
     for handler in build_admin_handlers():
-        app.add_handler(handler)
+        app.add_handler(handler, group=0)
     for handler in build_moderation_handlers():
-        app.add_handler(handler)
+        app.add_handler(handler, group=0)
+
+    # Group 1: Standalone handlers that only fire when no conversation state is
+    # active.  Manual post auto-detection lives here so it never hijacks active
+    # dashboard workflows (AI prompt, caption edit, login flow, etc.).
     for handler in build_manual_handlers(admin_filter):
-        app.add_handler(handler)
+        app.add_handler(handler, group=1)
 
     logger.info("Starting polling (bot API: admin + publish only)")
     app.run_polling(allowed_updates=["message", "callback_query"])

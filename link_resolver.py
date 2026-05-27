@@ -19,6 +19,9 @@ ASIN_PATTERNS = [
 
 ASIN_ONLY_PATTERN = re.compile(r"\b([A-Z0-9]{10})\b", re.I)
 
+# Strict match: the entire message (stripped) is exactly a 10-char ASIN.
+ASIN_STRICT_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.I)
+
 _http_client: httpx.AsyncClient | None = None
 
 
@@ -112,6 +115,51 @@ def is_standalone_asin(text: str) -> str | None:
     if ASIN_ONLY_PATTERN.fullmatch(token):
         return token
     return None
+
+
+AMAZON_DOMAINS = re.compile(
+    r"amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|com\.br|co\.jp|in|eg|sa|ae|nl|se|pl|sg|tr|mx)",
+    re.I,
+)
+REDIRECT_DOMAINS = re.compile(
+    r"(amzn\.(to|eu|asia)|bit\.ly|tinyurl\.com|t\.co|goo\.gl|ow\.ly|rb\.gy|short\.gy|tiny\.cc)",
+    re.I,
+)
+
+
+def is_manual_post_input(text: str) -> bool:
+    """
+    Return True only when the text is unambiguously a manual post request:
+    - A single strict ASIN (entire stripped text matches ^[A-Z0-9]{10}$), OR
+    - One or more URLs that are Amazon product links or known redirect domains.
+
+    Paragraphs, sentences, or any other free-form text return False.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    # Strict ASIN: full text is exactly 10 alphanumeric chars
+    if ASIN_STRICT_PATTERN.match(stripped):
+        return True
+
+    # Must contain at least one URL
+    urls = extract_all_urls_from_text(stripped)
+    if not urls:
+        return False
+
+    # Every token (words) outside the URLs should be empty / whitespace only
+    remaining = stripped
+    for url in urls:
+        remaining = remaining.replace(url, "")
+    if remaining.strip():
+        # There's non-URL text alongside the URLs — likely a paragraph with an embedded link
+        return False
+
+    # At least one URL must look like Amazon or a known short-link redirect
+    return any(
+        AMAZON_DOMAINS.search(u) or REDIRECT_DOMAINS.search(u) for u in urls
+    )
 
 
 def extract_manual_inputs(text: str) -> list[str]:

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 
 from config import (
     AI_CAPTION_ENABLED,
@@ -22,6 +23,7 @@ MODE_CONSERVATIVE = "conservative"
 MODE_MARKETING = "marketing"
 MODE_ARABIC = "arabic_translate"
 MODE_CUSTOM = "custom"
+MODE_FIXED_TEMPLATE = "fixed_template"
 
 VALID_MODES = {
     MODE_OFF,
@@ -29,6 +31,7 @@ VALID_MODES = {
     MODE_MARKETING,
     MODE_ARABIC,
     MODE_CUSTOM,
+    MODE_FIXED_TEMPLATE,
 }
 
 _SAFETY_RULES = """
@@ -227,6 +230,22 @@ async def rewrite_caption(
     if mode == MODE_OFF or not AI_CAPTION_ENABLED:
         return fallback
 
+    if mode == MODE_FIXED_TEMPLATE:
+        # Deterministic local template: no AI calls, no rewriting.
+        raw = price or ""
+        clean_price = re.sub(r"(جنيه|EGP|£)", "", raw, flags=re.IGNORECASE)
+        clean_price = (
+            clean_price.replace("\u200f", "")
+            .replace("\u200e", "")
+            .strip()
+        )
+        return (
+            f"🔥 عرض على {title}\n\n"
+            f"💰 بسعر {clean_price} جنيه\n\n"
+            "🔗 لينك العرض:\n"
+            f"{clean_url}"
+        ).strip()
+
     if AI_PROVIDER != "groq":
         logger.warning("AI_PROVIDER %s not supported — fallback", AI_PROVIDER)
         logger.info("FALLBACK TO NORMAL CAPTION")
@@ -247,6 +266,7 @@ async def rewrite_caption(
         MODE_MARKETING: "Marketing",
         MODE_ARABIC: "Arabic Translate",
         MODE_CUSTOM: "Custom Brand Tone",
+        MODE_FIXED_TEMPLATE: "Fixed Template",
     }.get(mode, mode)
     logger.info("AI CAPTION MODE: %s", mode_label)
     logger.info("AI REWRITE START")

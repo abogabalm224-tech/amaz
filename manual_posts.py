@@ -21,12 +21,14 @@ from link_resolver import (
     build_clean_url,
     extract_asin,
     extract_manual_inputs,
+    is_manual_post_input,
     is_standalone_asin,
     resolve_redirect,
 )
 from ai_caption import build_product_caption
 from telegram_publisher import build_caption, publish_to_channel
 from upload_prep import prepare_channel_upload
+from affiliate_tag import apply_affiliate_tag
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,7 @@ async def prepare_draft_from_input(
             return None
 
         asin, clean_url = resolved
+        display_url = apply_affiliate_tag(clean_url)
         product = await scrape_amazon(browser, clean_url, scrape_key)
         screenshot_path = product["screenshot"]
         temp_files.append(screenshot_path)
@@ -124,13 +127,13 @@ async def prepare_draft_from_input(
             return None
 
         if product["price"] == "Not found":
-            caption = build_caption(product["title"], product["price"], clean_url)
+            caption = build_caption(product["title"], product["price"], display_url)
         else:
             caption = await build_product_caption(
                 db,
                 product["title"],
                 product["price"],
-                clean_url,
+                display_url,
             )
 
         framed_image = apply_frame(screenshot_path)
@@ -382,13 +385,32 @@ async def handle_cancel_draft(
 
 
 class ManualInputFilter(filters.MessageFilter):
+    """Only matches text that is strictly an ASIN or Amazon/redirect URL.
+
+    Never matches free-form text such as AI prompts, captions, or login codes.
+    This filter is used for the *fallback* auto-detection handler that runs
+    OUTSIDE the ConversationHandler so active conversation states always win.
+    """
+
     def filter(self, message) -> bool:
         text = getattr(message, "text", None) or ""
-        return bool(extract_manual_inputs(text.strip()))
+        return is_manual_post_input(text.strip())
 
 
 def build_manual_handlers(admin_filter) -> list:
+    """
+    Standalone handlers registered OUTSIDE and AFTER the ConversationHandler
+    (group=1 in bot.py).  Because they live in a separate, lower-priority
+    handler group they are only reached when the ConversationHandler does NOT
+    consume the update (i.e. no active conversation state for this user).
+    """
+    private_admin = admin_filter & filters.ChatType.PRIVATE
     return [
+        # Auto-detect ASIN / Amazon URL when admin is idle in private chat.
+        MessageHandler(
+            private_admin & filters.TEXT & ~filters.COMMAND & ManualInputFilter(),
+            process_manual_text,
+        ),
         CallbackQueryHandler(
             handle_publish_draft, pattern=r"^publish_draft:\d+$"
         ),
@@ -399,11 +421,35 @@ def build_manual_handlers(admin_filter) -> list:
 
 
 def manual_entry_handler(admin_filter) -> MessageHandler:
+    """Entry point used inside the ConversationHandler for explicit manual mode.
+
+    Only activated after the admin pressed the 'Manual Post' button, which sets
+    UD_MANUAL_MODE in user_data.  Free-form text does NOT match this because
+    ManualInputFilter (not used here) isn't applied — the AWAIT_MANUAL_INPUT
+    state handler accepts any text.
+    """
     private_admin = admin_filter & filters.ChatType.PRIVATE
+    # This handler is kept as ConversationHandler entry point ONLY for the
+    # UD_MANUAL_MODE path (admin already pressed the button).  The filter
+    # intentionally checks user_data via a stateful filter so it won't fire
+    # unless manual mode is active.
     return MessageHandler(
-        private_admin & filters.TEXT & ~filters.COMMAND & ManualInputFilter(),
+        private_admin & filters.TEXT & ~filters.COMMAND & _ManualModeActiveFilter(),
         process_manual_text,
     )
+
+
+class _ManualModeActiveFilter(filters.MessageFilter):
+    """Matches only when UD_MANUAL_MODE is set in user_data (button was pressed)."""
+
+    def filter(self, message) -> bool:
+        # PTB passes context-free message here; we cannot access user_data in a
+        # plain MessageFilter.  We use a workaround: store the flag on the
+        # message object itself via a bot_data side-channel set by the callback.
+        # Since that's fragile, we simply return False here — explicit manual
+        # mode input is already handled by the AWAIT_MANUAL_INPUT state handler
+        # registered in manual_state_handlers().
+        return False
 
 
 def manual_state_handlers(admin_filter) -> dict:

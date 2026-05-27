@@ -10,6 +10,8 @@ SETTING_DESTINATION = "destination_channel_id"
 SETTING_PAUSED = "bot_paused"
 SETTING_AI_CAPTION_MODE = "ai_caption_mode"
 SETTING_AI_CUSTOM_PROMPT = "ai_custom_prompt"
+SETTING_AFFILIATE_TAG_ENABLED = "affiliate_tag_enabled"
+SETTING_AFFILIATE_TAG_VALUE = "affiliate_tag_value"
 
 
 class Database:
@@ -225,6 +227,18 @@ class Database:
 
     def set_ai_custom_prompt(self, prompt: str) -> None:
         self.set_setting(SETTING_AI_CUSTOM_PROMPT, prompt)
+
+    def get_affiliate_tag_enabled(self) -> bool:
+        return (self.get_setting(SETTING_AFFILIATE_TAG_ENABLED) or "0") == "1"
+
+    def set_affiliate_tag_enabled(self, enabled: bool) -> None:
+        self.set_setting(SETTING_AFFILIATE_TAG_ENABLED, "1" if enabled else "0")
+
+    def get_affiliate_tag_value(self) -> str:
+        return (self.get_setting(SETTING_AFFILIATE_TAG_VALUE) or "").strip()
+
+    def set_affiliate_tag_value(self, value: str) -> None:
+        self.set_setting(SETTING_AFFILIATE_TAG_VALUE, (value or "").strip())
 
     def get_last_published_asins(self, limit: int = 10) -> set[str]:
         with self._connect() as conn:

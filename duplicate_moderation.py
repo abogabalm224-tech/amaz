@@ -1,13 +1,16 @@
 import logging
+from html import escape as html_escape
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
-from config import ADMIN_USER_IDS, APPROVAL_TIMEOUT_MINUTES, LAST_PUBLISHED_LOOKBACK
+from config import ADMIN_USER_IDS, APPROVAL_TIMEOUT_MINUTES, LAST_PUBLISHED_LOOKBACK, AMAZON_DOMAIN
 from database import Database
 from telegram_publisher import publish_to_channel
 from file_cleanup import cleanup_files
 from upload_prep import prepare_channel_upload
+from affiliate_tag import apply_affiliate_tag
+from link_resolver import build_clean_url
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ async def send_approval_request(
         f"{title_line}"
         f"ASIN: <code>{asin}</code>\n"
         f"Source Channel: {name}\n\n"
+        f"🔗 Display link: <code>{html_escape(apply_affiliate_tag(build_clean_url(asin, AMAZON_DOMAIN)))}</code>\n\n"
         "This ASIN was published recently.\n\n"
         "Publish anyway?"
     )
