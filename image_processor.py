@@ -4,10 +4,10 @@ from PIL import Image
 def apply_frame(screenshot_path, output_path="framed_output.png"):
     frame_path = "frame.png"
 
-    LEFT = 35
-    TOP = 35
-    WIDTH = 1278
-    HEIGHT = 775
+    LEFT = 136
+    TOP = 155
+    WIDTH = 1293
+    HEIGHT = 850
 
     frame = Image.open(frame_path).convert("RGBA")
     screenshot = Image.open(screenshot_path).convert("RGBA")

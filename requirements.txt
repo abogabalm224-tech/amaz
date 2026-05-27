@@ -5,4 +5,3 @@ httpx
 Pillow
 python-dotenv
 google-genai
-groq

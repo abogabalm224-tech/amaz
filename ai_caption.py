@@ -1,4 +1,3 @@
-
 """AI caption rewrite via Groq (async-safe, fallback on failure)."""
 
 import asyncio

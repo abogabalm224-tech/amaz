@@ -180,7 +180,7 @@ async def scrape_amazon(
 
     context = await browser.new_context(
 
-        viewport={"width": 2000, "height": 1220},
+        viewport={"width": 1920, "height": 1600},
 
         user_agent=USER_AGENT,
 
