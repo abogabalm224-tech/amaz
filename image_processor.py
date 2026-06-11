@@ -5,7 +5,7 @@ def apply_frame(screenshot_path, output_path="framed_output.png"):
     frame_path = "frame.png"
 
     LEFT = 35
-    TOP = 35
+    TOP = -27
     WIDTH = 1287
     HEIGHT = 775
 
