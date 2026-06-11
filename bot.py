@@ -7,7 +7,9 @@ from telegram import Message
 from telegram.ext import ApplicationBuilder, filters as tg_filters
 
 from admin_dashboard import build_admin_handlers, refresh_runtime_config
-from amazon_scraper import BrowserManager, scrape_amazon
+from amazon_scraper import BrowserManager
+from creators_api import init_creators_client, shutdown_creators_client
+from product_fetcher import fetch_product, resolve_display_url
 from config import (
     ADMIN_USER_IDS,
     AMAZON_DOMAIN,
@@ -32,9 +34,8 @@ from duplicate_moderation import (
     send_approval_request,
 )
 from file_cleanup import cleanup_files
-from affiliate_tag import apply_affiliate_tag
+from coupon_price import coupon_apply_kwargs_from_product
 from manual_posts import build_manual_handlers
-from image_processor import apply_frame
 from link_resolver import (
     build_clean_url,
     close_http_client,
@@ -92,27 +93,58 @@ async def process_single_url(
         logger.info("ASIN FOUND: %s", asin)
 
         clean_url = build_clean_url(asin, AMAZON_DOMAIN)
-        display_url = apply_affiliate_tag(clean_url)
         scrape_asin = f"{asin}_{message_id}_{index}"
-        product = await scrape_amazon(browser, clean_url, scrape_asin)
+        coupon_enabled = db.get_coupon_detection_enabled()
+        product = await fetch_product(
+            db,
+            browser,
+            asin,
+            clean_url,
+            scrape_asin,
+            coupon_enabled=coupon_enabled,
+        )
+        display_url = resolve_display_url(product, clean_url)
         temp_files.append(product["screenshot"])
-        logger.info("SCRAPE SUCCESS: %r %r", product["title"], product["price"])
+        logger.info(
+            "SCRAPE SUCCESS: %r %r coupon=%r",
+            product["title"],
+            product["price"],
+            product.get("coupon"),
+        )
 
+        coupon = product.get("coupon") if coupon_enabled else None
+        logger.info(
+            "CAPTION DEBUG incoming price=%r coupon=%r list_price=%r "
+            "coupon_already_applied=%s",
+            product.get("price"),
+            coupon,
+            product.get("list_price"),
+            product.get("coupon_already_applied"),
+        )
+        coupon_kwargs = (
+            coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
+        )
         if product["title"] == "Not found":
-            caption = build_caption(product["title"], product["price"], display_url)
+            caption = build_caption(
+                product["title"],
+                product["price"],
+                display_url,
+                coupon=coupon,
+                coupon_kwargs=coupon_kwargs,
+            )
         else:
             caption = await build_product_caption(
                 db,
                 product["title"],
                 product["price"],
                 display_url,
+                coupon=coupon,
+                product=product,
             )
-        framed_image = apply_frame(product["screenshot"])
-        temp_files.append(framed_image)
-
-        upload_image = to_jpeg_for_telegram(framed_image)
-        if upload_image != framed_image:
+        upload_image = to_jpeg_for_telegram(product["screenshot"])
+        if upload_image != product["screenshot"]:
             temp_files.append(upload_image)
+        framed_image = product["screenshot"]
 
         if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK):
             logger.info("DUPLICATE ASIN DETECTED: %s", asin)
@@ -132,6 +164,8 @@ async def process_single_url(
                 source_channel_id=source_channel_id,
                 caption=caption,
                 image_path=held_for_approval,
+                coupon=coupon,
+                list_price=product.get("list_price"),
             )
             await send_approval_request(
                 application.bot,
@@ -141,6 +175,9 @@ async def process_single_url(
                 product["title"],
                 source_channel_id,
                 held_for_approval,
+                price=product["price"],
+                coupon=coupon,
+                list_price=product.get("list_price"),
             )
             return False
 
@@ -264,6 +301,7 @@ async def on_startup(application) -> None:
         logger.warning("ADMIN_USER_IDS is empty — /admin and approvals disabled")
 
     await init_http_client()
+    await init_creators_client()
 
     browser = BrowserManager()
     await browser.start()
@@ -311,6 +349,7 @@ async def on_shutdown(application) -> None:
     if browser:
         await browser.stop()
 
+    await shutdown_creators_client()
     await stop_telethon_listener(application)
     await close_http_client()
     logger.info("Shutdown complete")

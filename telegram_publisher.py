@@ -10,6 +10,7 @@ from config import (
     TELEGRAM_READ_TIMEOUT,
     TELEGRAM_WRITE_TIMEOUT,
 )
+from coupon_price import format_standard_price_line
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,23 @@ RETRYABLE_ERRORS = (
 )
 
 
-def build_caption(title: str, price: str, clean_url: str) -> str:
-    return (
-        f"📦 {title}\n\n"
-        f"💰 {price}\n\n"
-        f"🔗 {clean_url}"
-    )
+def build_caption(
+    title: str,
+    price: str,
+    clean_url: str,
+    coupon: str | None = None,
+    coupon_kwargs: dict | None = None,
+) -> str:
+    ck = coupon_kwargs or {}
+    lines = [
+        f"📦 {title}",
+        "",
+        format_standard_price_line(
+            price, coupon, debug_path="build_caption", **ck
+        ),
+    ]
+    lines.extend(["", f"🔗 {clean_url}"])
+    return "\n".join(lines)
 
 
 async def publish_to_channel(

@@ -12,11 +12,11 @@ from telegram.ext import (
 
 from config import ADMIN_USER_IDS
 from conversation_states import AWAIT_DRAFT_CAPTION
-from amazon_scraper import BrowserManager, scrape_amazon
+from amazon_scraper import BrowserManager
+from product_fetcher import fetch_product, resolve_display_url
 from config import AMAZON_DOMAIN, LAST_PUBLISHED_LOOKBACK
 from database import Database
 from file_cleanup import cleanup_files
-from image_processor import apply_frame
 from link_resolver import (
     build_clean_url,
     extract_asin,
@@ -28,7 +28,7 @@ from link_resolver import (
 from ai_caption import build_product_caption
 from telegram_publisher import build_caption, publish_to_channel
 from upload_prep import prepare_channel_upload
-from affiliate_tag import apply_affiliate_tag
+from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +116,16 @@ async def prepare_draft_from_input(
             return None
 
         asin, clean_url = resolved
-        display_url = apply_affiliate_tag(clean_url)
-        product = await scrape_amazon(browser, clean_url, scrape_key)
+        coupon_enabled = db.get_coupon_detection_enabled()
+        product = await fetch_product(
+            db,
+            browser,
+            asin,
+            clean_url,
+            scrape_key,
+            coupon_enabled=coupon_enabled,
+        )
+        display_url = resolve_display_url(product, clean_url)
         screenshot_path = product["screenshot"]
         temp_files.append(screenshot_path)
 
@@ -126,20 +134,37 @@ async def prepare_draft_from_input(
             cleanup_files([screenshot_path])
             return None
 
+        coupon = product.get("coupon") if coupon_enabled else None
+        logger.info(
+            "CAPTION DEBUG incoming price=%r coupon=%r list_price=%r "
+            "coupon_already_applied=%s",
+            product.get("price"),
+            coupon,
+            product.get("list_price"),
+            product.get("coupon_already_applied"),
+        )
+        coupon_kwargs = (
+            coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
+        )
         if product["price"] == "Not found":
-            caption = build_caption(product["title"], product["price"], display_url)
+            caption = build_caption(
+                product["title"],
+                product["price"],
+                display_url,
+                coupon=coupon,
+                coupon_kwargs=coupon_kwargs,
+            )
         else:
             caption = await build_product_caption(
                 db,
                 product["title"],
                 product["price"],
                 display_url,
+                coupon=coupon,
+                product=product,
             )
 
-        framed_image = apply_frame(screenshot_path)
-        temp_files.append(framed_image)
-
-        held_image = framed_image
+        held_image = screenshot_path
         if held_image in temp_files:
             temp_files.remove(held_image)
 
@@ -151,6 +176,8 @@ async def prepare_draft_from_input(
             caption=caption,
             image_path=held_image,
             created_by=admin_id,
+            coupon=coupon,
+            list_price=product.get("list_price"),
         )
         draft = db.get_draft_post(draft_id)
         logger.info("DRAFT CREATED draft_id=%s asin=%s", draft_id, asin)
@@ -302,11 +329,23 @@ async def handle_publish_draft(
 
     publish_path, publish_temp = prepare_channel_upload(draft["image_path"])
     try:
+        caption = draft["caption"]
+        if draft.get("price") and draft["price"] != "Not found":
+            coupon = draft.get("coupon")
+            if not db.get_coupon_detection_enabled():
+                coupon = None
+            caption = normalize_caption_price_line(
+                caption,
+                draft["price"],
+                coupon,
+                debug_path="publish_draft",
+                list_price_text=draft.get("list_price"),
+            )
         sent = await publish_to_channel(
             context.application.bot,
             destination_id,
             publish_path,
-            draft["caption"],
+            caption,
         )
         db.add_published_product(
             draft["asin"],

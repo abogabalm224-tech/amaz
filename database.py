@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ SETTING_AI_CAPTION_MODE = "ai_caption_mode"
 SETTING_AI_CUSTOM_PROMPT = "ai_custom_prompt"
 SETTING_AFFILIATE_TAG_ENABLED = "affiliate_tag_enabled"
 SETTING_AFFILIATE_TAG_VALUE = "affiliate_tag_value"
+SETTING_COUPON_DETECTION_ENABLED = "coupon_detection_enabled"
 
 
 class Database:
@@ -90,15 +92,51 @@ class Database:
 
     def _migrate_schema(self) -> None:
         with self._connect() as conn:
-            cols = {
+            pending_cols = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(pending_approvals)").fetchall()
             }
-            if "price" not in cols:
+            if "price" not in pending_cols:
                 conn.execute(
                     "ALTER TABLE pending_approvals ADD COLUMN price TEXT NOT NULL DEFAULT ''"
                 )
-                conn.commit()
+            if "coupon" not in pending_cols:
+                conn.execute("ALTER TABLE pending_approvals ADD COLUMN coupon TEXT")
+            if "list_price" not in pending_cols:
+                conn.execute("ALTER TABLE pending_approvals ADD COLUMN list_price TEXT")
+
+            draft_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(draft_posts)").fetchall()
+            }
+            if "coupon" not in draft_cols:
+                conn.execute("ALTER TABLE draft_posts ADD COLUMN coupon TEXT")
+            if "list_price" not in draft_cols:
+                conn.execute("ALTER TABLE draft_posts ADD COLUMN list_price TEXT")
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creators_cache (
+                    asin TEXT NOT NULL,
+                    profile TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (asin, profile)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_drop_tracked_asins (
+                    asin TEXT PRIMARY KEY,
+                    last_price TEXT,
+                    last_checked_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
 
     def seed_from_env(self, source_channel_id: int, destination_channel_id: int) -> None:
         if source_channel_id and source_channel_id != 0:
@@ -240,6 +278,15 @@ class Database:
     def set_affiliate_tag_value(self, value: str) -> None:
         self.set_setting(SETTING_AFFILIATE_TAG_VALUE, (value or "").strip())
 
+    def get_coupon_detection_enabled(self) -> bool:
+        raw = self.get_setting(SETTING_COUPON_DETECTION_ENABLED)
+        if raw is None:
+            return True
+        return raw == "1"
+
+    def set_coupon_detection_enabled(self, enabled: bool) -> None:
+        self.set_setting(SETTING_COUPON_DETECTION_ENABLED, "1" if enabled else "0")
+
     def get_last_published_asins(self, limit: int = 10) -> set[str]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -283,14 +330,17 @@ class Database:
         source_channel_id: int,
         caption: str,
         image_path: str,
+        coupon: str | None = None,
+        list_price: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO pending_approvals
-                    (asin, title, price, clean_url, source_channel_id, caption, image_path, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    (asin, title, price, clean_url, source_channel_id, caption,
+                     image_path, status, created_at, coupon, list_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -301,6 +351,8 @@ class Database:
                     caption,
                     image_path,
                     now,
+                    coupon,
+                    list_price,
                 ),
             )
             conn.commit()
@@ -346,14 +398,17 @@ class Database:
         caption: str,
         image_path: str,
         created_by: int,
+        coupon: str | None = None,
+        list_price: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO draft_posts
-                    (asin, title, price, clean_url, caption, image_path, status, created_at, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                    (asin, title, price, clean_url, caption, image_path, status,
+                     created_at, created_by, coupon, list_price)
+                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -364,6 +419,8 @@ class Database:
                     image_path,
                     now,
                     created_by,
+                    coupon,
+                    list_price,
                 ),
             )
             conn.commit()
@@ -397,3 +454,94 @@ class Database:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # --- Creators API cache ---
+
+    def get_creators_cache(self, asin: str, profile: str) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT payload_json, expires_at FROM creators_cache
+                WHERE asin = ? AND profile = ? AND expires_at > ?
+                """,
+                (asin.upper(), profile, now),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload_json"])
+        except json.JSONDecodeError:
+            return None
+
+    def set_creators_cache(
+        self,
+        asin: str,
+        profile: str,
+        payload: dict[str, Any],
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creators_cache (asin, profile, payload_json, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(asin, profile) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    asin.upper(),
+                    profile,
+                    json.dumps(payload, ensure_ascii=False),
+                    expires,
+                    now.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    # --- Price drop tracking (infrastructure for future alerts) ---
+
+    def upsert_tracked_asin(self, asin: str, *, last_price: str | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO price_drop_tracked_asins (asin, last_price, last_checked_at, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(asin) DO UPDATE SET
+                    last_price = COALESCE(excluded.last_price, price_drop_tracked_asins.last_price),
+                    last_checked_at = excluded.last_checked_at
+                """,
+                (asin.upper(), last_price, now, now),
+            )
+            conn.commit()
+
+    def list_tracked_asins(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM price_drop_tracked_asins
+                ORDER BY COALESCE(last_checked_at, '') ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_tracked_asin_price(self, asin: str, last_price: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE price_drop_tracked_asins
+                SET last_price = ?, last_checked_at = ?
+                WHERE asin = ?
+                """,
+                (last_price, now, asin.upper()),
+            )
+            conn.commit()

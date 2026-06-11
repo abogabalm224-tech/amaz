@@ -10,6 +10,12 @@ from telegram_publisher import publish_to_channel
 from file_cleanup import cleanup_files
 from upload_prep import prepare_channel_upload
 from affiliate_tag import apply_affiliate_tag
+from coupon_price import (
+    apply_coupon_to_price,
+    effective_coupon_for_caption,
+    format_arabic_price_line,
+    normalize_caption_price_line,
+)
 from link_resolver import build_clean_url
 
 logger = logging.getLogger(__name__)
@@ -39,14 +45,34 @@ async def send_approval_request(
     title: str,
     source_channel_id: int,
     image_path: str,
+    *,
+    price: str = "",
+    coupon: str | None = None,
+    list_price: str | None = None,
 ) -> None:
     name = source_channel_name(db, source_channel_id)
     title_line = f"📦 {title}\n" if title else ""
+    price_line = ""
+    if price and coupon and db.get_coupon_detection_enabled():
+        result = apply_coupon_to_price(
+            price,
+            coupon,
+            list_price_text=list_price,
+        )
+        effective = effective_coupon_for_caption(coupon, result)
+        price_display = format_arabic_price_line(
+            price,
+            effective,
+            debug_path="approval_request",
+            list_price_text=list_price,
+        )
+        price_line = f"{html_escape(price_display)}\n\n"
     text = (
         "⚠️ <b>Duplicate Product Detected</b>\n\n"
         f"{title_line}"
         f"ASIN: <code>{asin}</code>\n"
         f"Source Channel: {name}\n\n"
+        f"{price_line}"
         f"🔗 Display link: <code>{html_escape(apply_affiliate_tag(build_clean_url(asin, AMAZON_DOMAIN)))}</code>\n\n"
         "This ASIN was published recently.\n\n"
         "Publish anyway?"
@@ -92,14 +118,26 @@ async def publish_and_record(
     if not destination_id:
         raise RuntimeError("Destination channel not configured")
 
+    db = application.bot_data["db"]
+    caption = pending["caption"]
+    if pending.get("price") and pending["price"] != "Not found":
+        coupon = pending.get("coupon")
+        if not db.get_coupon_detection_enabled():
+            coupon = None
+        caption = normalize_caption_price_line(
+            caption,
+            pending["price"],
+            coupon,
+            debug_path="publish_duplicate",
+            list_price_text=pending.get("list_price"),
+        )
+
     sent = await publish_to_channel(
         application.bot,
         destination_id,
         publish_path,
-        pending["caption"],
+        caption,
     )
-
-    db = application.bot_data["db"]
     db.add_published_product(
         pending["asin"],
         pending["title"],

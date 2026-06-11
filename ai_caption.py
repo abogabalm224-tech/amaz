@@ -12,6 +12,13 @@ from config import (
     AI_PROVIDER,
     AMAZON_DOMAIN,
 )
+from coupon_price import (
+    apply_coupon_to_price,
+    coupon_apply_kwargs_from_product,
+    effective_coupon_for_caption,
+    format_arabic_price_line,
+    normalize_caption_price_line,
+)
 from telegram_publisher import build_caption
 
 logger = logging.getLogger(__name__)
@@ -172,8 +179,24 @@ def _build_prompt(
     clean_url: str,
     mode: str,
     custom_prompt: str | None,
+    coupon: str | None = None,
+    coupon_kwargs: dict | None = None,
 ) -> str:
     instructions = _mode_instructions(mode, custom_prompt)
+    ck = coupon_kwargs or {}
+    price_result = apply_coupon_to_price(price, coupon, **ck)
+    effective_coupon = effective_coupon_for_caption(coupon, price_result)
+    coupon_block = ""
+    if effective_coupon:
+        price_line_hint = format_arabic_price_line(
+            price, effective_coupon, debug_path="_build_prompt", **ck
+        )
+        coupon_block = (
+            "Price line (use this exact format — coupon already applied to price, "
+            "do NOT add a separate 🎟 coupon line):\n"
+            f"{price_line_hint}\n"
+            f"Original scraped price (reference only): {price}\n"
+        )
     return (
         "You write Telegram product post captions in Arabic for Amazon Egypt.\n"
         f"{_SAFETY_RULES}\n"
@@ -181,7 +204,8 @@ def _build_prompt(
         f"{instructions}\n"
         "Input data (use only this):\n"
         f"Product title: {title}\n"
-        f"Price (raw): {price}\n"
+        f"Price (raw scraped): {price}\n"
+        f"{coupon_block}"
         f"Marketplace: {marketplace}\n"
         f"Product URL (paste verbatim on 🔗 line): {clean_url}\n\n"
         "Output ONLY the final caption text with the exact structure and spacing described above. "
@@ -217,11 +241,14 @@ async def rewrite_caption(
     clean_url: str,
     mode: str,
     custom_prompt: str | None = None,
+    coupon: str | None = None,
+    coupon_kwargs: dict | None = None,
 ) -> str:
     """
     Rewrite caption using AI, or return standard caption when off/disabled/failed.
     """
-    fallback = build_caption(title, price, clean_url)
+    ck = coupon_kwargs or {}
+    fallback = build_caption(title, price, clean_url, coupon=coupon, coupon_kwargs=ck)
     mode = (mode or MODE_OFF).strip().lower()
 
     if mode not in VALID_MODES:
@@ -231,20 +258,20 @@ async def rewrite_caption(
         return fallback
 
     if mode == MODE_FIXED_TEMPLATE:
-        # Deterministic local template: no AI calls, no rewriting.
-        raw = price or ""
-        clean_price = re.sub(r"(جنيه|EGP|£)", "", raw, flags=re.IGNORECASE)
-        clean_price = (
-            clean_price.replace("\u200f", "")
-            .replace("\u200e", "")
-            .strip()
-        )
-        return (
-            f"🔥 عرض على {title}\n\n"
-            f"💰 بسعر {clean_price} جنيه\n\n"
-            "🔗 لينك العرض:\n"
-            f"{clean_url}"
-        ).strip()
+        price_result = apply_coupon_to_price(price, coupon, **ck)
+        effective = effective_coupon_for_caption(coupon, price_result)
+        parts = [
+            f"🔥 عرض على {title}",
+            "",
+            format_arabic_price_line(
+                price,
+                effective,
+                debug_path="rewrite_caption:fixed_template",
+                **ck,
+            ),
+        ]
+        parts.extend(["", "🔗 لينك العرض:", clean_url])
+        return "\n".join(parts).strip()
 
     if AI_PROVIDER != "groq":
         logger.warning("AI_PROVIDER %s not supported — fallback", AI_PROVIDER)
@@ -271,7 +298,9 @@ async def rewrite_caption(
     logger.info("AI CAPTION MODE: %s", mode_label)
     logger.info("AI REWRITE START")
 
-    prompt = _build_prompt(title, price, marketplace, clean_url, mode, custom_prompt)
+    prompt = _build_prompt(
+        title, price, marketplace, clean_url, mode, custom_prompt, coupon, ck
+    )
 
     try:
         text = await asyncio.wait_for(
@@ -281,6 +310,13 @@ async def rewrite_caption(
         if not text:
             raise ValueError("Empty caption from model")
         caption = _ensure_url_in_caption(text, clean_url)
+        caption = normalize_caption_price_line(
+            caption,
+            price,
+            coupon,
+            debug_path=f"rewrite_caption:ai:{mode}",
+            **ck,
+        )
         if len(caption) > 1024:
             caption = caption[:1020] + "…"
         logger.info("AI REWRITE SUCCESS")
@@ -299,16 +335,31 @@ async def build_product_caption(
     price: str,
     clean_url: str,
     marketplace: str | None = None,
+    coupon: str | None = None,
+    product: dict | None = None,
 ) -> str:
     """Build caption using DB AI mode settings."""
     marketplace = marketplace or AMAZON_DOMAIN
     mode = db.get_ai_caption_mode()
     custom = db.get_ai_custom_prompt()
-    return await rewrite_caption(
+    use_coupon = coupon if db.get_coupon_detection_enabled() else None
+    coupon_kwargs = coupon_apply_kwargs_from_product(product)
+    caption = await rewrite_caption(
         title,
         price,
         marketplace,
         clean_url,
         mode,
         custom,
+        use_coupon,
+        coupon_kwargs,
     )
+    if use_coupon and price and price != "Not found":
+        caption = normalize_caption_price_line(
+            caption,
+            price,
+            use_coupon,
+            debug_path=f"build_product_caption:{mode}",
+            **coupon_kwargs,
+        )
+    return caption

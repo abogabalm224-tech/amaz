@@ -34,6 +34,24 @@ ADMIN_USER_IDS = _parse_admin_ids(os.getenv("ADMIN_USER_IDS", ""))
 
 AMAZON_DOMAIN = os.getenv("AMAZON_DOMAIN", "www.amazon.eg")
 
+# Amazon Creators API (primary product data source)
+CREATORS_CREDENTIAL_ID = os.getenv("CREATORS_CREDENTIAL_ID", "")
+CREATORS_CREDENTIAL_SECRET = os.getenv("CREATORS_CREDENTIAL_SECRET", "")
+CREATORS_CREDENTIAL_VERSION = os.getenv("CREATORS_CREDENTIAL_VERSION", "2.2")
+CREATORS_MARKETPLACE = os.getenv("CREATORS_MARKETPLACE", AMAZON_DOMAIN)
+CREATORS_PARTNER_TAG = os.getenv("CREATORS_PARTNER_TAG", "")
+CREATORS_API_TPS = float(os.getenv("CREATORS_API_TPS", "1"))
+CREATORS_API_TPD = int(os.getenv("CREATORS_API_TPD", "8640"))
+CREATORS_TOKEN_REFRESH_MARGIN_SEC = int(
+    os.getenv("CREATORS_TOKEN_REFRESH_MARGIN_SEC", "300")
+)
+# When true (default), product images use Playwright screenshot + frame overlay.
+FRAME_PRODUCT_IMAGES = os.getenv("FRAME_PRODUCT_IMAGES", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 DEDUP_TTL_SECONDS = int(os.getenv("DEDUP_TTL_SECONDS", "3600"))
 DEDUP_MAX_SIZE = int(os.getenv("DEDUP_MAX_SIZE", "2000"))
 

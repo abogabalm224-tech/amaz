@@ -86,6 +86,9 @@ CB_AFFILIATE_ON = "adm:affiliate:on"
 CB_AFFILIATE_OFF = "adm:affiliate:off"
 CB_AFFILIATE_CHANGE = "adm:affiliate:change"
 CB_AFFILIATE_TEST = "adm:affiliate:test"
+CB_COUPON_SETTINGS = "adm:coupon"
+CB_COUPON_ON = "adm:coupon:on"
+CB_COUPON_OFF = "adm:coupon:off"
 CB_TELETHON_START = "adm:telethon:start"
 CB_BACKUP = "adm:backup"
 CB_RESTORE = "adm:restore"
@@ -154,6 +157,10 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
                 InlineKeyboardButton(
                     "🔗 Affiliate Tag Settings",
                     callback_data=CB_AFFILIATE_SETTINGS,
+                ),
+                InlineKeyboardButton(
+                    "🎟 Coupon Detection",
+                    callback_data=CB_COUPON_SETTINGS,
                 ),
             ],
             [
@@ -300,6 +307,27 @@ def _affiliate_tag_menu_text(db: Database) -> str:
         "Current tag: <code>(disabled)</code>\n"
         "\n"
         "Enable to append `tag=` to published/display links."
+    )
+
+
+def _coupon_detection_menu_text(db: Database) -> str:
+    enabled = db.get_coupon_detection_enabled()
+    status = "ON" if enabled else "OFF"
+    return (
+        "🎟 <b>Coupon Detection</b>\n\n"
+        f"Status: <b>{status}</b>\n\n"
+        "When ON, the scraper looks for Amazon coupons and adds a "
+        "🎟 line to captions when found."
+    )
+
+
+def _coupon_detection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Coupon Detection ON", callback_data=CB_COUPON_ON)],
+            [InlineKeyboardButton("❌ Coupon Detection OFF", callback_data=CB_COUPON_OFF)],
+            [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
+        ]
     )
 
 
@@ -809,6 +837,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             "🧪 Test Affiliate Link\n\n"
             f"Original: {sample}\n"
             f"Transformed: {transformed}"
+        )
+        return ConversationHandler.END
+
+    if data == CB_COUPON_SETTINGS:
+        await _safe_edit_message_text(
+            query,
+            _coupon_detection_menu_text(db),
+            reply_markup=_coupon_detection_keyboard(),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_COUPON_ON:
+        db.set_coupon_detection_enabled(True)
+        await _safe_edit_message_text(
+            query,
+            _coupon_detection_menu_text(db),
+            reply_markup=_coupon_detection_keyboard(),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_COUPON_OFF:
+        db.set_coupon_detection_enabled(False)
+        await _safe_edit_message_text(
+            query,
+            _coupon_detection_menu_text(db),
+            reply_markup=_coupon_detection_keyboard(),
+            parse_mode="HTML",
         )
         return ConversationHandler.END
 
