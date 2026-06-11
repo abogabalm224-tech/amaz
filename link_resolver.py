@@ -221,10 +221,26 @@ async def resolve_redirect(url: str) -> str:
 
     assert _http_client is not None
 
+    head_status: int | None = None
     try:
         response = await _http_client.head(url)
-        return str(response.url)
-    except httpx.HTTPError:
-        logger.debug("HEAD failed for %s — retrying with GET", url)
-        response = await _http_client.get(url)
-        return str(response.url)
+        head_status = response.status_code
+        if head_status < 400:
+            final = str(response.url)
+            logger.info("RESOLVER SUCCESS final_url=%s", final)
+            return final
+        logger.info("RESOLVER HEAD FAILED status=%s", head_status)
+    except httpx.HTTPError as exc:
+        resp = getattr(exc, "response", None)
+        head_status = resp.status_code if resp is not None else None
+        if head_status is not None:
+            logger.info("RESOLVER HEAD FAILED status=%s", head_status)
+        else:
+            logger.info("RESOLVER HEAD FAILED error=%s", exc)
+
+    # Short-link providers (e.g. a.y-ay.com) often block HEAD — follow redirects via GET.
+    logger.info("RESOLVER FALLBACK TO GET")
+    response = await _http_client.get(url)
+    final = str(response.url)
+    logger.info("RESOLVER SUCCESS final_url=%s", final)
+    return final
