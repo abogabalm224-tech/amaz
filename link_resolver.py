@@ -14,7 +14,9 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.I)
 ASIN_PATTERNS = [
     r"/dp/([A-Z0-9]{10})",
     r"/gp/product/([A-Z0-9]{10})",
+    r"/gp/aw/d/([A-Z0-9]{10})",
     r"/product/([A-Z0-9]{10})",
+    r"[?&]asin=([A-Z0-9]{10})",
 ]
 
 ASIN_ONLY_PATTERN = re.compile(r"\b([A-Z0-9]{10})\b", re.I)
@@ -117,22 +119,29 @@ def is_standalone_asin(text: str) -> str | None:
     return None
 
 
+def is_http_url(text: str) -> bool:
+    """True when text is an http(s) URL."""
+    return text.strip().lower().startswith(("http://", "https://"))
+
+
 AMAZON_DOMAINS = re.compile(
     r"amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|com\.br|co\.jp|in|eg|sa|ae|nl|se|pl|sg|tr|mx)",
     re.I,
 )
-REDIRECT_DOMAINS = re.compile(
-    r"(amzn\.(to|eu|asia)|bit\.ly|tinyurl\.com|t\.co|goo\.gl|ow\.ly|rb\.gy|short\.gy|tiny\.cc)",
-    re.I,
-)
+
+
+def is_amazon_url(url: str) -> bool:
+    """True when URL host/path indicates an Amazon marketplace page."""
+    return bool(AMAZON_DOMAINS.search(url))
 
 
 def is_manual_post_input(text: str) -> bool:
     """
     Return True only when the text is unambiguously a manual post request:
     - A single strict ASIN (entire stripped text matches ^[A-Z0-9]{10}$), OR
-    - One or more URLs that are Amazon product links or known redirect domains.
+    - One or more http(s) URLs with no other non-whitespace text.
 
+    Redirect expansion and Amazon validation happen later in resolve_asin_from_input().
     Paragraphs, sentences, or any other free-form text return False.
     """
     stripped = text.strip()
@@ -156,10 +165,8 @@ def is_manual_post_input(text: str) -> bool:
         # There's non-URL text alongside the URLs — likely a paragraph with an embedded link
         return False
 
-    # At least one URL must look like Amazon or a known short-link redirect
-    return any(
-        AMAZON_DOMAINS.search(u) or REDIRECT_DOMAINS.search(u) for u in urls
-    )
+    # Accept any http(s) URL — unknown shorteners are resolved before ASIN extraction.
+    return all(is_http_url(u) for u in urls)
 
 
 def extract_manual_inputs(text: str) -> list[str]:
@@ -218,5 +225,6 @@ async def resolve_redirect(url: str) -> str:
         response = await _http_client.head(url)
         return str(response.url)
     except httpx.HTTPError:
+        logger.debug("HEAD failed for %s — retrying with GET", url)
         response = await _http_client.get(url)
         return str(response.url)
