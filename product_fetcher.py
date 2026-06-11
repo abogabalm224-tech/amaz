@@ -59,6 +59,34 @@ def _log_creators_fallback(asin: str, exc: CreatorsAPIError) -> None:
     )
 
 
+def _maybe_apply_frame(
+    screenshot_path: str | None,
+    output_path: str,
+    *,
+    asin: str,
+    frame_enabled: bool,
+) -> str | None:
+    """Apply frame only when enabled and the source screenshot file exists."""
+    if not frame_enabled:
+        if screenshot_path and os.path.exists(screenshot_path):
+            return screenshot_path
+        return None
+    if screenshot_path and os.path.exists(screenshot_path):
+        return apply_frame(screenshot_path, output_path=output_path)
+    logger.warning(
+        "FRAME SKIPPED — screenshot missing path=%s asin=%s",
+        screenshot_path,
+        asin,
+    )
+    return None
+
+
+def _require_screenshot(path: str | None, *, asin: str) -> str:
+    if path and os.path.exists(path):
+        return path
+    raise RuntimeError(f"Screenshot generation failed for ASIN {asin}")
+
+
 def resolve_display_url(product: dict, clean_url: str) -> str:
     """
     Creators vended URLs must not be modified.
@@ -103,7 +131,13 @@ async def _resolve_product_image(
     if image_url:
         if await _download_image(image_url, base_path):
             if frame_enabled:
-                return apply_frame(base_path, output_path=f"{scrape_key}_framed.png")
+                framed = _maybe_apply_frame(
+                    base_path,
+                    f"{scrape_key}_framed.png",
+                    asin=asin,
+                    frame_enabled=True,
+                )
+                return _require_screenshot(framed, asin=asin)
             return base_path
 
     # Framed posts need a screenshot; reuse coupon scan capture when available.
@@ -132,7 +166,13 @@ async def _resolve_product_image(
             )
             raw = scan.get("screenshot")
         if raw and os.path.isfile(raw):
-            return apply_frame(raw, output_path=f"{scrape_key}_framed.png")
+            framed = _maybe_apply_frame(
+                raw,
+                f"{scrape_key}_framed.png",
+                asin=asin,
+                frame_enabled=True,
+            )
+            return _require_screenshot(framed, asin=asin)
 
     raise RuntimeError(f"No product image available for asin={asin}")
 
@@ -223,6 +263,8 @@ async def fetch_product(
                     product.get("coupon_already_applied"),
                 )
                 return product
+        except RuntimeError:
+            raise
         except CreatorsAPIError as exc:
             _log_creators_fallback(asin, exc)
         except Exception:
@@ -245,9 +287,16 @@ async def fetch_product(
     product["asin"] = asin.upper()
 
     if frame_enabled and product.get("screenshot"):
-        product["screenshot"] = apply_frame(
+        framed = _maybe_apply_frame(
             product["screenshot"],
-            output_path=f"{scrape_key}_framed.png",
+            f"{scrape_key}_framed.png",
+            asin=asin,
+            frame_enabled=True,
+        )
+        product["screenshot"] = _require_screenshot(framed, asin=asin)
+    else:
+        product["screenshot"] = _require_screenshot(
+            product.get("screenshot"), asin=asin
         )
 
     return product

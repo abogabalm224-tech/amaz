@@ -4,6 +4,7 @@ Infrastructure only: shared Chromium process + fresh context per scrape.
 """
 
 import logging
+import os
 
 from playwright.async_api import Browser, Playwright, async_playwright
 
@@ -469,6 +470,14 @@ async def scrape_amazon(
             coupon,
             coupon_already_applied,
         )
+
+        if not screenshot_path or not os.path.exists(screenshot_path):
+            logger.error(
+                "SCREENSHOT GENERATION FAILED path=%s asin=%s",
+                screenshot_path,
+                asin,
+            )
+            raise RuntimeError(f"Screenshot generation failed for ASIN {asin}")
 
         return {
             "title": title,

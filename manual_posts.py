@@ -200,6 +200,16 @@ async def prepare_draft_from_input(
         logger.info("DRAFT CREATED draft_id=%s asin=%s", draft_id, asin)
         logger.info("DRAFT IMAGE RETAINED path=%s", held_image)
         return draft, held_image
+    except RuntimeError as exc:
+        if "Screenshot generation failed" in str(exc):
+            logger.error("DRAFT PREPARATION FAILED — screenshot missing")
+            cleanup_files(temp_files)
+            raise
+        logger.exception("Draft preparation failed for %r", item)
+        cleanup_files(temp_files)
+        if held_image:
+            cleanup_files([held_image])
+        return None
     except Exception:
         logger.exception("Draft preparation failed for %r", item)
         cleanup_files(temp_files)
@@ -255,12 +265,21 @@ async def process_manual_text(
     created = 0
     for index, item in enumerate(inputs, start=1):
         scrape_key = f"manual_{user.id}_{msg.message_id}_{index}_{int(time.time())}"
-        prepared = await prepare_draft_from_input(
-            app,
-            user.id,
-            item,
-            scrape_key=scrape_key,
-        )
+        try:
+            prepared = await prepare_draft_from_input(
+                app,
+                user.id,
+                item,
+                scrape_key=scrape_key,
+            )
+        except RuntimeError as exc:
+            if "Screenshot generation failed" in str(exc):
+                logger.error("DRAFT PREPARATION FAILED — screenshot missing")
+                await msg.reply_text(
+                    "❌ Failed to generate the product image. Please try again."
+                )
+                continue
+            raise
         if not prepared:
             await msg.reply_text(
                 f"Could not prepare (scrape failed or invalid input): "
