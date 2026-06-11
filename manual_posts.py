@@ -21,6 +21,8 @@ from link_resolver import (
     build_clean_url,
     extract_asin,
     extract_manual_inputs,
+    is_amazon_url,
+    is_http_url,
     is_manual_post_input,
     is_standalone_asin,
     resolve_redirect,
@@ -80,20 +82,35 @@ def build_preview_caption(draft: dict, *, duplicate: bool) -> str:
 
 async def resolve_asin_from_input(item: str) -> tuple[str, str] | None:
     """Return (asin, clean_url) from URL, redirect URL, or bare ASIN."""
+    logger.info("MANUAL INPUT RECEIVED: %s", item)
+
     bare = is_standalone_asin(item)
     if bare:
-        logger.info("ASIN INPUT DETECTED: %s", bare)
+        logger.info("ASIN EXTRACTED: %s", bare)
         return bare, build_clean_url(bare, AMAZON_DOMAIN)
 
-    logger.info("URL INPUT DETECTED: %s", item)
-    asin = extract_asin(item)
-    if asin:
-        return asin, build_clean_url(asin, AMAZON_DOMAIN)
+    if not is_http_url(item):
+        logger.warning("Invalid manual input — not ASIN or URL: %r", item)
+        return None
 
-    final_url = await resolve_redirect(item)
+    original = item.strip()
+    try:
+        final_url = await resolve_redirect(original)
+    except Exception:
+        logger.exception("REDIRECT RESOLVED: %s -> failed", original)
+        return None
+
+    logger.info("REDIRECT RESOLVED: %s -> %s", original, final_url)
+
+    if is_amazon_url(final_url):
+        logger.info("AMAZON URL VALIDATED")
+
     asin = extract_asin(final_url)
     if not asin:
+        logger.warning("ASIN extraction failed after redirect: %s", final_url)
         return None
+
+    logger.info("ASIN EXTRACTED: %s", asin)
     return asin, build_clean_url(asin, AMAZON_DOMAIN)
 
 
@@ -181,7 +198,8 @@ async def prepare_draft_from_input(
         )
         draft = db.get_draft_post(draft_id)
         logger.info("DRAFT CREATED draft_id=%s asin=%s", draft_id, asin)
-        return draft, screenshot_path
+        logger.info("DRAFT IMAGE RETAINED path=%s", held_image)
+        return draft, held_image
     except Exception:
         logger.exception("Draft preparation failed for %r", item)
         cleanup_files(temp_files)
@@ -250,7 +268,7 @@ async def process_manual_text(
                 parse_mode="HTML",
             )
             continue
-        draft, screenshot_path = prepared
+        draft, _ = prepared
         try:
             await send_draft_preview(app.bot, _db(context), msg.chat_id, draft)
         except Exception:
@@ -260,7 +278,7 @@ async def process_manual_text(
                 parse_mode="HTML",
             )
             continue
-        cleanup_files([screenshot_path])
+        logger.info("DRAFT IMAGE RETAINED path=%s", draft["image_path"])
         created += 1
 
     if created:
@@ -355,6 +373,10 @@ async def handle_publish_draft(
         )
         if not db.set_draft_status(draft_id, "published"):
             await query.edit_message_caption("Already handled.")
+            logger.info(
+                "DRAFT IMAGE CLEANUP AFTER PUBLISH path=%s",
+                draft["image_path"],
+            )
             cleanup_files([draft["image_path"]])
             if publish_temp:
                 cleanup_files([publish_path])
@@ -363,6 +385,10 @@ async def handle_publish_draft(
         await query.edit_message_caption(
             f"✅ Published ASIN <code>{draft['asin']}</code>",
             parse_mode="HTML",
+        )
+        logger.info(
+            "DRAFT IMAGE CLEANUP AFTER PUBLISH path=%s",
+            draft["image_path"],
         )
         paths = [draft["image_path"]]
         if publish_temp:
@@ -414,6 +440,10 @@ async def handle_cancel_draft(
 
     if draft["status"] == "draft":
         db.set_draft_status(draft_id, "cancelled")
+        logger.info(
+            "DRAFT IMAGE CLEANUP AFTER REJECT path=%s",
+            draft["image_path"],
+        )
         cleanup_files([draft["image_path"]])
         logger.info("DRAFT CANCELLED draft_id=%s asin=%s", draft_id, draft["asin"])
 
