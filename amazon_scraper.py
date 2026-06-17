@@ -8,6 +8,10 @@ import os
 
 from playwright.async_api import Browser, Playwright, async_playwright
 
+from telegram import Bot
+from config import BOT_TOKEN, ADMIN_USER_IDS
+import datetime
+
 from config import CHROMIUM_ARGS, PRICE_SELECTORS, TITLE_SELECTORS, USER_AGENT
 from coupon_normalize import normalize_coupon_text
 from coupon_price import parse_price_number
@@ -15,6 +19,9 @@ from coupon_price import parse_price_number
 logger = logging.getLogger(__name__)
 
 _ACCEPT_LANGUAGE = "ar-EG,ar;q=0.9,en;q=0.8"
+
+# Single Bot instance for failure artifact delivery
+_FAILURE_BOT = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 
 # Priority 1 — Amazon clip-coupon widget (checkbox / Apply coupon)
 WIDGET_COUPON_SELECTORS = [
@@ -331,6 +338,76 @@ async def _extract_coupon(page, *, enabled: bool) -> str | None:
     return coupon
 
 
+async def _send_failure_artifacts(
+    asin: str,
+    url: str,
+    html_path: str | None = None,
+    screenshot_path: str | None = None,
+) -> None:
+    """Send failure artifacts to Telegram admins without raising exceptions."""
+    if not _FAILURE_BOT or not ADMIN_USER_IDS:
+        logger.warning("FAILURE ARTIFACT SEND SKIPPED: BOT_TOKEN or ADMIN_USER_IDS not configured")
+        return
+
+    html_sent = False
+    screenshot_sent = False
+
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        caption = f"🚨 Scrape Failure\n\nASIN: {asin}\nURL: {url}\nTimestamp: {timestamp}"
+
+        for admin_id in ADMIN_USER_IDS:
+            if html_path and os.path.exists(html_path):
+                try:
+                    with open(html_path, "rb") as f:
+                        await _FAILURE_BOT.send_document(
+                            chat_id=admin_id,
+                            document=f,
+                            caption=f"{caption}\n\nType: HTML dump",
+                            read_timeout=30,
+                            write_timeout=30,
+                        )
+                    logger.info("FAILURE ARTIFACT SENT type=html admin=%s", admin_id)
+                    html_sent = True
+                except Exception as exc:
+                    logger.error("FAILURE ARTIFACT SEND FAILED type=html admin=%s error=%s", admin_id, exc)
+                    logger.error("FAILURE ARTIFACT RETAINED path=%s", html_path)
+
+            if screenshot_path and os.path.exists(screenshot_path):
+                try:
+                    with open(screenshot_path, "rb") as f:
+                        await _FAILURE_BOT.send_photo(
+                            chat_id=admin_id,
+                            photo=f,
+                            caption=f"{caption}\n\nType: Screenshot",
+                            read_timeout=30,
+                            write_timeout=30,
+                        )
+                    logger.info("FAILURE ARTIFACT SENT type=screenshot admin=%s", admin_id)
+                    screenshot_sent = True
+                except Exception as exc:
+                    logger.error("FAILURE ARTIFACT SEND FAILED type=screenshot admin=%s error=%s", admin_id, exc)
+                    logger.error("FAILURE ARTIFACT RETAINED path=%s", screenshot_path)
+
+        # Cleanup only if delivery succeeded
+        if html_sent and html_path and os.path.exists(html_path):
+            try:
+                os.remove(html_path)
+                logger.info("FAILURE ARTIFACT CLEANUP path=%s", html_path)
+            except Exception as exc:
+                logger.error("FAILURE ARTIFACT CLEANUP FAILED path=%s error=%s", html_path, exc)
+
+        if screenshot_sent and screenshot_path and os.path.exists(screenshot_path):
+            try:
+                os.remove(screenshot_path)
+                logger.info("FAILURE ARTIFACT CLEANUP path=%s", screenshot_path)
+            except Exception as exc:
+                logger.error("FAILURE ARTIFACT CLEANUP FAILED path=%s error=%s", screenshot_path, exc)
+
+    except Exception as exc:
+        logger.error("FAILURE ARTIFACT SEND FAILED error=%s", exc)
+
+
 async def scrape_coupon_and_screenshot(
     browser_mgr: BrowserManager,
     clean_url: str,
@@ -454,6 +531,7 @@ async def scrape_amazon(
             if not list_price and retry_list:
                 list_price = retry_list
 
+        html_dump_path = None
         if title == "Not found":
             page_url = page.url
             page_title = await page.title()
@@ -546,6 +624,14 @@ async def scrape_amazon(
                 "FAILURE SCREENSHOT SAVED path=%s",
                 failure_path,
             )
+
+            await _send_failure_artifacts(
+                asin=asin,
+                url=page.url,
+                html_path=html_dump_path,
+                screenshot_path=failure_path,
+            )
+
             logger.error(
                 "SCREENSHOT GENERATION FAILED path=%s asin=%s",
                 screenshot_path,
