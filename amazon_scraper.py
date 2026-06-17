@@ -510,6 +510,36 @@ async def scrape_amazon(
                 else:
                     raise
 
+        # Detect Continue Shopping interstitial
+        try:
+            continue_button = page.locator(
+                "button.a-button-text[alt*='متابعة التسوق']"
+            )
+
+            await continue_button.first.wait_for(
+                state="visible",
+                timeout=5000,
+            )
+
+            logger.warning(
+                "CONTINUE SHOPPING PAGE DETECTED asin=%s",
+                asin,
+            )
+
+            await continue_button.first.click()
+
+            await page.wait_for_load_state("networkidle")
+            await page.wait_for_timeout(3000)
+
+            logger.info(
+                "CONTINUE SHOPPING PAGE BYPASSED asin=%s final_url=%s",
+                asin,
+                page.url,
+            )
+
+        except Exception:
+            pass
+
         await page.wait_for_timeout(3000)
 
         await page.evaluate("""
