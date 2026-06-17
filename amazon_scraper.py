@@ -116,6 +116,14 @@ async def _wait_for_product_title(page) -> bool:
             return True
         except Exception:
             continue
+    # Log selector search failure
+    logger.error(
+        "TITLE SELECTOR SEARCH FAILED\n"
+        "asin=%s\n"
+        "tried_selectors=%s",
+        page.url.split("/dp/")[-1].split("/")[0] if "/dp/" in page.url else "unknown",
+        TITLE_SELECTORS,
+    )
     return False
 
 
@@ -446,6 +454,66 @@ async def scrape_amazon(
             if not list_price and retry_list:
                 list_price = retry_list
 
+        if title == "Not found":
+            page_url = page.url
+            page_title = await page.title()
+            body_text = await page.inner_text("body")
+            html = await page.content()
+            
+            # Save full HTML to disk
+            html_dump_path = f"failure_{asin}.html"
+            with open(html_dump_path, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.error(
+                "FAILURE HTML SAVED path=%s",
+                html_dump_path,
+            )
+            
+
+            logger.error(
+                "SCRAPE FAILURE DIAGNOSTICS:\n"
+                "asin=%s\n"
+                "url=%s\n"
+                "page_title=%r\n"
+                "BODY PREVIEW=%r\n"
+                "HTML PREVIEW=%r",
+                asin,
+                page_url,
+                page_title,
+                body_text[:2000],
+                html[:2000],
+            )
+            logger.error(
+                "URL ANALYSIS:\n"
+                "current_url=%s\n"
+                "contains_amazon=%s\n"
+                "contains_captcha=%s\n"
+                "contains_ap_signin=%s\n"
+                "contains_errors=%s",
+                page.url,
+                "amazon" in page.url.lower(),
+                "captcha" in page.url.lower(),
+                "ap/signin" in page.url.lower(),
+                "/errors/" in page.url.lower(),
+            )
+            logger.error(
+                "PAGE INDICATORS:\n"
+                "captcha=%s\n"
+                "robot_check=%s\n"
+                "sign_in=%s\n"
+                "sorry_page=%s\n"
+                "503_service_unavailable=%s\n"
+                "automated_access=%s\n"
+                "product_title_exists=%s",
+                "captcha" in html.lower(),
+                "robot check" in html.lower(),
+                "sign in" in html.lower(),
+                "sorry" in html.lower(),
+                "503" in html.lower(),
+                "automated access" in html.lower(),
+                await page.locator("#productTitle").count() > 0,
+            )
+
         coupon = await _extract_coupon(
             page, enabled=coupon_detection_enabled
         )
@@ -472,6 +540,12 @@ async def scrape_amazon(
         )
 
         if not screenshot_path or not os.path.exists(screenshot_path):
+            failure_path = f"failure_{asin}.png"
+            await page.screenshot(path=failure_path, full_page=True)
+            logger.error(
+                "FAILURE SCREENSHOT SAVED path=%s",
+                failure_path,
+            )
             logger.error(
                 "SCREENSHOT GENERATION FAILED path=%s asin=%s",
                 screenshot_path,
